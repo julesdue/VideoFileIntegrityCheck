@@ -1,0 +1,50 @@
+# Byte-compiled / optimized / DLL files
+*/__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# FFmpeg binaries (too large for version control)
+ffmpeg_bin/linux/
+ffmpeg_bin/macos/
+ffmpeg_bin/windows/
+
+# Log files
+*.log
+
+# Claude Code and development tools
+.kilocode/
+.claude/
+claude.md
