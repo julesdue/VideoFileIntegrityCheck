@@ -1,13 +1,31 @@
 import sys
 import os
 import subprocess
+from typing import Optional
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QTextEdit, QLabel, QFileDialog, QListWidget, QHBoxLayout, QListWidgetItem, QMenu, QCheckBox, QScrollArea, QMessageBox
+    QApplication, QWidget, QMainWindow, QVBoxLayout, QPushButton, QTextEdit, QLabel, QFileDialog, QListWidget, QHBoxLayout, QListWidgetItem, QMenu, QCheckBox, QScrollArea, QMessageBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QTimer
-from PyQt6.QtGui import QIcon, QPixmap, QKeySequence, QShortcut
+from PyQt6.QtGui import QIcon, QPixmap, QKeySequence, QShortcut, QAction
 from scripts.checkFile import check_video_file, get_available_check_methods
 from utils.platform_utils import get_ffmpeg_paths, verify_ffmpeg_installation, is_valid_file_path, get_invalid_path_reason
+from ui.page_settings import SettingsPage
+
+# Keywords that mark a raw FFmpeg log line as an issue worth surfacing, and the
+# subset of those that indicate an ERROR rather than a WARNING. Kept as the single
+# source of truth so legacy-method log scanning and structured-error severity
+# (VideoIntegrityError.severity in ['critical', 'major']) can't drift apart.
+ISSUE_KEYWORDS = ['error', 'invalid frame', 'unable', 'corrupt', 'failed']
+ERROR_KEYWORDS = ['corrupt', 'failed', 'unable', 'critical']
+
+
+def classify_log_line_severity(line: str) -> Optional[str]:
+    """Return 'ERROR', 'WARNING', or None for a raw FFmpeg log line."""
+    lowered = line.lower()
+    if not any(keyword in lowered for keyword in ISSUE_KEYWORDS):
+        return None
+    return 'ERROR' if any(keyword in lowered for keyword in ERROR_KEYWORDS) else 'WARNING'
+
 
 class FFmpegCheckThread(QThread):
     log_signal = pyqtSignal(str)
@@ -54,8 +72,7 @@ class FFmpegCheckThread(QThread):
             self.log_signal.emit(f'   Reason: {reason}')
             self.error_signal.emit(f'Invalid file path: {file} - {reason}')
             
-        total = len(valid_files)
-        for idx, file in enumerate(valid_files):
+        for file in valid_files:
             # Check for stop request
             if self.stop_requested:
                 self.log_signal.emit('🛑 Processing stopped by user request.')
@@ -69,11 +86,7 @@ class FFmpegCheckThread(QThread):
             self.log_signal.emit(f"CHECKING FILE: {file}")
             self.log_signal.emit(f"{separator}\n")
             self.log_signal.emit(f'Checking: {file}')
-            
-            def emit_progress(percent):
-                overall = int(((idx + percent / 100) / total) * 100)
-                # Progress signal removed as requested
-            
+
             # Run selected check methods
             for method, enabled in self.check_methods.items():
                 if not enabled:
@@ -97,33 +110,20 @@ class FFmpegCheckThread(QThread):
                 def emit_log(line):
                     self.log_signal.emit(f'    {line}')
                     self.collected_log.append(line)
-                    # Enhanced error detection
-                    lowered = line.lower()
-                    if any(keyword in lowered for keyword in ['error', 'invalid frame', 'unable', 'corrupt', 'failed']):
+                    severity = classify_log_line_severity(line)
+                    if severity is not None:
                         err = line.strip()
                         if err not in self.errors_found:
                             self.errors_found.add(err)
                             self.error_signal.emit(err)
-                            # Emit to summary with severity detection
-                            if any(critical in lowered for critical in ['corrupt', 'failed', 'unable', 'critical']):
-                                issue_msg = f'[{method}] {err}'
-                                self.issue_signal.emit('ERROR', issue_msg)
-                                # Track method issues
-                                if method not in self.method_issues:
-                                    self.method_issues[method] = []
-                                self.method_issues[method].append(issue_msg)
-                            else:
-                                issue_msg = f'[{method}] {err}'
-                                self.issue_signal.emit('WARNING', issue_msg)
-                                # Track method issues
-                                if method not in self.method_issues:
-                                    self.method_issues[method] = []
-                                self.method_issues[method].append(issue_msg)
-                            
+                            issue_msg = f'[{method}] {err}'
+                            self.issue_signal.emit(severity, issue_msg)
+                            self.method_issues.setdefault(method, []).append(issue_msg)
+
                 try:
                     # Use the enhanced check_video_file function
-                    result = check_video_file(file, self.ffmpeg_path, method, 
-                                            log_callback=emit_log, progress_callback=emit_progress)
+                    result = check_video_file(file, self.ffmpeg_path, method,
+                                            ffprobe_path=self.ffprobe_path, log_callback=emit_log)
                     
                     # Handle both old and new return formats
                     if len(result) == 4:
@@ -132,20 +132,10 @@ class FFmpegCheckThread(QThread):
                         
                         # Process detailed errors for summary with enhanced messages
                         for error in detailed_errors:
-                            severity_display = error.severity.upper()
-                            if error.severity in ['critical', 'major']:
-                                display_severity = 'ERROR'
-                            else:
-                                display_severity = 'WARNING'
-                            
-                            # Use the enhanced detailed message
-                            enhanced_message = error.get_detailed_message()
-                            issue_msg = f'[{method}] {enhanced_message}'
+                            display_severity = 'ERROR' if error.severity in ['critical', 'major'] else 'WARNING'
+                            issue_msg = f'[{method}] {error.get_detailed_message()}'
                             self.issue_signal.emit(display_severity, issue_msg)
-                            # Track method issues
-                            if method not in self.method_issues:
-                                self.method_issues[method] = []
-                            self.method_issues[method].append(issue_msg)
+                            self.method_issues.setdefault(method, []).append(issue_msg)
                         
                         if stats:
                             self.statistics[f'{method}_{file}'] = stats
@@ -162,29 +152,20 @@ class FFmpegCheckThread(QThread):
                         self.collected_log.append(f'EXCEPTION: {method} check failed for {file}')
                         # Add RESULT line for failed check
                         self.log_signal.emit(f'RESULT: {method.upper()} CHECK: EXCEPTION occurred')
-                        # Track method exception
-                        if method not in self.method_issues:
-                            self.method_issues[method] = []
-                        self.method_issues[method].append(f"EXCEPTION: {method} check failed for {file}")
+                        self.method_issues.setdefault(method, []).append(f"EXCEPTION: {method} check failed for {file}")
                     else:
                         self.log_signal.emit(f'  ⚠ ERROR: {method} check failed (code: {returncode})')
                         self.collected_log.append(f'ERROR: {method} check failed for {file}')
                         # Add RESULT line for failed check
                         self.log_signal.emit(f'RESULT: {method.upper()} CHECK: Issues detected')
-                        # Track method issues
-                        if method not in self.method_issues:
-                            self.method_issues[method] = []
-                        self.method_issues[method].append(f"ERROR: {method} check failed (code: {returncode}) for {file}")
-                        
+                        self.method_issues.setdefault(method, []).append(f"ERROR: {method} check failed (code: {returncode}) for {file}")
+
                 except Exception as e:
                     self.log_signal.emit(f'  ✗ EXCEPTION: {method} check crashed: {str(e)}')
                     self.collected_log.append(f'EXCEPTION: {method} check crashed for {file}: {str(e)}')
                     # Add RESULT line for crashed check
                     self.log_signal.emit(f'RESULT: {method.upper()} CHECK: EXCEPTION occurred')
-                    # Track method exception
-                    if method not in self.method_issues:
-                        self.method_issues[method] = []
-                    self.method_issues[method].append(f"EXCEPTION: {method} check crashed: {str(e)}")
+                    self.method_issues.setdefault(method, []).append(f"EXCEPTION: {method} check crashed: {str(e)}")
                     
                 # Add separator at the end of the method
                 separator = "-" * 60
@@ -193,7 +174,6 @@ class FFmpegCheckThread(QThread):
                 self.log_signal.emit(f"{separator}\n")
                 self.method_progress_signal.emit(method, "done")
                     
-            emit_progress(100)
             # Signal that we're done with this file
             self.file_progress_signal.emit(file, "done")
             
@@ -238,19 +218,18 @@ class FFmpegCheckThread(QThread):
         self.log_signal.emit(summary)
         self.collected_log.append(summary)
 
-class VideoIntegrityCheckerUI(QWidget):
+class VideoIntegrityCheckerUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Video File Integrity Checker - Enhanced')
         self.setGeometry(100, 100, 1200, 600)  # Increased size for more options
         self.setAcceptDrops(True)
         self.files = []
+        self.settings_page = None  # Lazily created on first "Settings" menu click
         
         # Get available check methods
         available_methods = get_available_check_methods()
-        # Filter out comprehensive method since it just runs all other methods
-        filtered_methods = {k: v for k, v in available_methods.items() if k != 'comprehensive'}
-        self.check_methods = {method: True for method in filtered_methods.keys()}
+        self.check_methods = {method: True for method in available_methods.keys()}
         
         self.init_ui()
         self.check_thread = None  # Fixed thread attribute name
@@ -268,9 +247,11 @@ class VideoIntegrityCheckerUI(QWidget):
         self.active_spinners = set()
 
     def init_ui(self):
+        self._init_menu_bar()
+
         # Create main horizontal layout with three columns
         main_layout = QHBoxLayout()
-        
+
         # First column: Drag and drop area
         first_column = QVBoxLayout()
         self.label = QLabel('Drag and drop video files here:')
@@ -322,10 +303,7 @@ class VideoIntegrityCheckerUI(QWidget):
             'metadata_validation': 'Validates stream metadata consistency, timestamp accuracy (PTS/DTS), duration matching between audio/video, codec parameters, and container-level metadata integrity.'
         }
         
-        # Filter out comprehensive method and create checkboxes with descriptions
-        filtered_methods = {k: v for k, v in available_methods.items() if k != 'comprehensive'}
-        
-        for method, description in filtered_methods.items():
+        for method, description in available_methods.items():
             # Create a horizontal layout for the checkbox and indicator
             method_layout = QHBoxLayout()
             
@@ -410,11 +388,28 @@ class VideoIntegrityCheckerUI(QWidget):
         
         # Make the file list take up all available space in the first column
         first_column.setStretchFactor(self.file_list, 1)
-        
-        self.setLayout(main_layout)
-        
+
+        central_widget = QWidget()
+        central_widget.setLayout(main_layout)
+        self.setCentralWidget(central_widget)
+
         # Verify FFmpeg installation on startup
         self.verify_ffmpeg_on_startup()
+
+    def _init_menu_bar(self):
+        menu_bar = self.menuBar()
+        settings_menu = menu_bar.addMenu('Settings')
+
+        open_settings_action = QAction('Open Settings...', self)
+        open_settings_action.triggered.connect(self.open_settings)
+        settings_menu.addAction(open_settings_action)
+
+    def open_settings(self):
+        if self.settings_page is None:
+            self.settings_page = SettingsPage()
+        self.settings_page.show()
+        self.settings_page.raise_()
+        self.settings_page.activateWindow()
 
     def verify_ffmpeg_on_startup(self):
         """Verify FFmpeg installation and show platform info"""

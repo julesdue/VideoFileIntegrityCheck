@@ -3,10 +3,10 @@ Platform-specific utilities for cross-platform video file integrity checking
 """
 import os
 import platform
+import shutil
 import sys
 import tempfile
-import shutil
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 
 def get_platform_name() -> str:
@@ -23,29 +23,56 @@ def get_platform_name() -> str:
         return 'linux'
 
 
+def find_ffmpeg_in_path(ffmpeg_name: Optional[str] = None) -> Optional[str]:
+    """
+    Scan the OS PATH environment variable for an ffmpeg executable.
+
+    Args:
+        ffmpeg_name: Executable name to search for (defaults to the
+            platform-appropriate name, e.g. 'ffmpeg.exe' on Windows).
+
+    Returns:
+        Absolute path to the first match found on PATH, or None if not found.
+    """
+    if ffmpeg_name is None:
+        ffmpeg_name = 'ffmpeg.exe' if get_platform_name() == 'windows' else 'ffmpeg'
+    return shutil.which(ffmpeg_name)
+
+
 # Global variables to store temporary FFmpeg paths
 _TEMP_FFMPEG_PATH = None
 _TEMP_FFPROBE_PATH = None
 
 def get_ffmpeg_paths() -> Tuple[str, str]:
     """
-    Get platform-appropriate FFmpeg and FFprobe executable paths
-    
+    Get platform-appropriate FFmpeg and FFprobe executable paths.
+
+    Resolution order:
+    1. User-configured override (Settings page), if set and valid.
+    2. Bundled ffmpeg_bin/<platform>/ binaries (or PyInstaller-extracted copies).
+
     Returns:
         Tuple of (ffmpeg_path, ffprobe_path)
     """
     global _TEMP_FFMPEG_PATH, _TEMP_FFPROBE_PATH
-    
+
     # Determine platform and executable names
     platform_name = get_platform_name()
-    
+
     if platform_name == 'windows':
         ffmpeg_name = 'ffmpeg.exe'
         ffprobe_name = 'ffprobe.exe'
     else:
         ffmpeg_name = 'ffmpeg'
         ffprobe_name = 'ffprobe'
-    
+
+    # User-configured override takes precedence over the bundled binaries
+    from .settings import get_ffmpeg_override  # local import avoids a circular import at module load time
+    override_path = get_ffmpeg_override()
+    if override_path and os.path.isfile(override_path):
+        override_dir = os.path.dirname(override_path)
+        return override_path, os.path.join(override_dir, ffprobe_name)
+
     # Check if we're running in a PyInstaller bundle
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         # We're in a bundled app, try to use paths from _MEIPASS
@@ -287,4 +314,3 @@ def get_invalid_path_reason(file_path: str) -> str:
         return ""
     except Exception as e:
         return f"Error validating path: {str(e)}"
-        return False
