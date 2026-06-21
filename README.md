@@ -3,16 +3,17 @@
 A cross-platform GUI python tool for deep video file validation on **Windows**, **macOS**, and **Linux**. Detects corruption, encoding errors, quality issues, and more using multiple advanced methods.
 
 ## Main Checks
+Each method lives in its own module under `scripts/checks/` and corresponds 1:1 to a checkbox in the UI.
+
 | Method                | Description                                 | Speed   |
 |-----------------------|---------------------------------------------|---------|
 | `basic`               | Quick FFmpeg null output check              | Fast    |
 | `frame_crc`/`md5`     | Per-frame checksum validation               | Moderate|
 | `stream_analysis`     | Deep stream/codec probing                   | Moderate|
 | `sync_check`          | Audio/video sync validation                 | Fast    |
-| `comprehensive`       | Runs all methods (recommended)              | Slow    |
 | `file_validation`     | Binary-level file structure check           | Very Fast|
 | `quality_analysis`    | Detects black/freeze frames, audio issues   | Slow    |
-| `metadata_validation` | Metadata/timestamp consistency              | Fast    |
+| `metadata_validation` | Metadata/timestamp consistency, GOP/bitstream/frame/A-V sync analysis | Fast |
 
 
 
